@@ -1,7 +1,7 @@
 # Fraudulent Bitcoin Transaction Detection
 
 This project predicts the probability that a Bitcoin transaction is illicit. Transactions form a directed
-graph, and the model must generalize from training periods **1?35** to test periods **36?49**.
+graph, and the model must generalize from training periods **1-35** to test periods **36-49**.
 The complete workflow is implemented in [e1121223.ipynb](e1121223.ipynb), covering data preparation,
 feature engineering, model search, chronological validation and submission generation.
 
