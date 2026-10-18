@@ -1,9 +1,11 @@
-# BT4012 reproducible fraud detection
+# Fraudulent Bitcoin Transaction Detection
 
-Open `e1121223.ipynb`, reload it from disk, restart the kernel, and Run All.
-The version banner must say **DIVERSE-GRAPH-V11 | 92 individual + 12 ensemble Optuna trials**.
+This project predicts the probability that a Bitcoin transaction is illicit. Transactions form a directed
+graph, and the model must generalize from training periods **1?35** to test periods **36?49**.
+The complete workflow is implemented in [e1121223.ipynb](e1121223.ipynb), covering data preparation,
+feature engineering, model search, chronological validation and submission generation.
 
-## Fresh setup
+## Setup
 
 Use Python 3.10 or 3.11 and the pinned `requirements.txt`:
 
@@ -13,23 +15,49 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m ipykernel install --user --name bt4012 --display-name BT4012
 ```
 
-Select that kernel. Keep the notebook with `train.csv`, `test.csv`, `txs_edgelist.csv`, and
-`sample_submission.csv`, or edit `DATA_DIR`. Every result is computed in the current run.
-No previous output, model, study, external dataset, or downloaded solution is required.
-The notebook is self-contained; the tests are optional and are not needed for training.
+Select the **BT4012** kernel in VS Code or Jupyter and use the repository folder as the working directory.
+The PowerShell commands above are for Windows; on macOS/Linux, use `.venv/bin/python` for the virtual
+environment's interpreter. Restart the kernel and **Run All**.
 
-## V11 changes
+The notebook requires all four CSVs. Place them beside the notebook, or edit `DATA_DIR`:
 
-1. Add a two-stage graph-risk classifier using chronologically out-of-fold teacher predictions.
-2. Add Extra Trees and Random Forest, expand XGBoost, and explicitly test model contributions
-   to an ensemble even when their standalone scores are lower.
-3. Expand and redistribute fixed-count hyperparameter searches while retaining window selection,
-   three-seed final checks, reference recipes, duplicate removal and replacement margins.
+| File | Purpose |
+|---|---|
+| `train.csv` | Transaction attributes, periods and labels, including unknown labels |
+| `test.csv` | Transactions requiring predictions |
+| `txs_edgelist.csv` | Directed connections between transactions |
+| `sample_submission.csv` | Output columns and row ordering |
 
-The previous 64 same-family joint trials are reduced to 12 to fund broader experiments.
-This revision does not introduce a new holdout or change the chronological scoring objective.
-It implements suggestions 1, 2 and 3 only; subgroup specialists and a revised validation split
-are not part of this revision.
+Obtain these files through the competition's authorized data access; they do not need to be included
+in the GitHub repository. Keep the notebook filename `e1121223.ipynb`: it reads its own source to record
+the run. If the version check fails, reload the notebook from disk before restarting its kernel.
+
+The notebook is self-contained and fits all models from the CSVs. Saved models, studies, output folders
+and external data are not required. Tests are optional and are not needed for training.
+
+## Workflow
+
+1. Validate the supplied data and exclude unknown labels from supervised fitting.
+2. Build transaction, graph-structure and within-period rank features.
+3. Generate chronological out-of-fold risk features for a two-stage LightGBM classifier.
+4. Compare LightGBM, XGBoost, Extra Trees and Random Forest using temporal validation and Optuna.
+5. Evaluate training windows, three-seed predictions and complementary model blends.
+6. Select a model or ensemble, refit it through period 35 and export aligned test probabilities.
+
+## Data preprocessing and features
+
+The notebook checks column schemas, identifiers, label values, time ranges and submission alignment.
+Unknown labels are excluded from supervised fitting rather than converted to licit. Transaction IDs
+and submission indices are not predictors. The 165 numeric attributes are already normalized;
+infinities become NaN. Boosting models handle missing values, while forest models use median imputers
+fitted only on their training partitions. No synthetic transactions are generated.
+
+Candidate feature sets include raw attributes, the first 93 attributes, graph structure, neighborhood
+aggregates and within-period percentile ranks. Structural features describe incoming/outgoing degrees,
+component sizes, source/sink roles and walk statistics. Attribute aggregates include directional means,
+deviations and two-hop information. Every graph endpoint contributes topology, including nodes without
+attributes. Labeled training rows and test rows supply neighbor attributes to make observation coverage
+more comparable; unavailable values are not treated as zero.
 
 ## Search budget
 
@@ -43,8 +71,8 @@ FINAL_SEEDS = [42, 137, 2026]
 ```
 
 There are **104 Optuna trials**, plus declared reference configurations. Joint trials fit two
-components per fold. Defaults are fixed counts, with no wall-clock timeout. Runtime on the full
-competition data has not been measured; it can exceed the previous 67-minute run.
+components per fold. Defaults are fixed counts, with no wall-clock timeout. A full run on the competition data took approximately **119 minutes before archiving** on the author's
+device. Runtime varies with hardware and sampled configurations.
 
 | Study | Main choices |
 |---|---|
@@ -60,16 +88,15 @@ structural, or raw-plus-period-rank features. A median imputer is fitted on each
 Random Forest bootstraps observations; Extra Trees uses randomized thresholds without bootstrapping.
 Both support recency sample weights. Forest tree count and boosting iterations are different concepts.
 
-Individual TPE studies use `min(10, max(2, count // 3))` startup trials. The 24-trial XGBoost study
-therefore includes adaptive TPE search, unlike the previous four startup-only trials.
-Set an individual family count to zero to disable its study. The original XGBoost reference remains.
+Optuna's individual TPE studies use `min(10, max(2, count // 3))` initial trials before adaptive search.
+Set a family count to zero to disable its study. Separately declared reference models are still evaluated.
 Set both joint counts to zero to disable joint tuning. Disabling the window experiment also requires
-zero joint counts. All changed settings are recorded in the run configuration.
+zero joint counts. All settings are recorded in the run configuration.
 
 ## Neighboring predicted risk
 
 Transactions are graph nodes; edges indicate directed connections, not amounts or wallet ownership.
-The new branch derives 13 features: the teacher's own predicted risk, and for each incoming/outgoing
+The graph-risk branch derives 13 features: the teacher's own predicted risk, and for each incoming/outgoing
 neighborhood, mean risk, maximum risk, fraction at or above 0.5, observed count, observed fraction,
 and weighted two-hop mean risk. These are features for a second LightGBM classifier alongside the
 original 165 features. No neighbor label is attached as an input feature.
@@ -78,18 +105,18 @@ Training features use chronological cross-fitting:
 
 - The first teacher trains on periods 1-3 and predicts periods 4-7.
 - The next trains through period 7 and predicts periods 8-11, and so on through period 35.
-- Each teacher uses the literal recent-reference parameters, up to 20 periods of history,
+- Each teacher uses the fixed LightGBM parameters in `recent_reference_params`, up to 20 periods of history,
   half-life 32, and 132 trees. The teacher is not tuned against its prediction block.
 - A second-stage fit uses only labeled rows at or before its own cutoff, with available OOF features.
   Periods 1-3 are excluded from stage two because no earlier teacher predictions are available.
-- For validation or test, a teacher trained through the applicable cutoff creates the new features.
+- For validation or test, a teacher trained through the applicable cutoff creates the risk features.
   Final test features use a teacher trained through period 35.
 
 `GRAPH_MIN_HISTORY`, `GRAPH_OOF_BLOCK_PERIODS`, `GRAPH_TEACHER_WINDOW`, and
 `GRAPH_HIGH_RISK_THRESHOLD` declare this policy. OOF caches are built within each run and may cover
 all training periods, but fitting always selects only its allowed historical rows. Featureless graph
 nodes retain topology; they are not assigned fabricated zero-risk scores. Missing means/maxima remain
-NaN. Attribute sources use labeled training rows and test rows, matching the existing observation policy.
+NaN. Attribute sources use labeled training rows and test rows, following the same attribute-availability policy across periods.
 The 0.5 threshold defines a feature only; Kaggle submissions remain continuous probabilities.
 
 The notebook checks that no connected component spans known periods before computing global graph
@@ -97,12 +124,13 @@ features. This is batch prediction on the supplied graph, not a claim of real-ti
 
 ## Window selection, recency and ensembles
 
-The fixed-parameter screen retains windows **16, 20, 24** and half-life 32. Each gets the final three
+The fixed-parameter screen compares windows **16, 20, 24** and half-life 32. Each gets the final three
 seeds. Compare equal-weight pairs 16/20, 16/24, 20/24, then lock the best pair for joint parameter tuning.
-Individual boosting searches still offer all history and 12/16/20/24/28/32 periods. New forest and graph-risk
-studies offer all history and 16/20/24 periods. These choices are prior experiment-informed hypotheses.
+Individual boosting searches offer all history and 12/16/20/24/28/32-period windows. Forest and graph-risk
+studies offer all history and 16/20/24-period windows. Finite windows limit training to recent history;
+all-history candidates test whether older examples remain useful.
 
-`RECENCY_MODE` controls new individual models and broad joint trials:
+`RECENCY_MODE` controls individual search candidates and broad joint trials:
 
 | Mode | Half-life |
 |---|---|
@@ -112,10 +140,11 @@ studies offer all history and 16/20/24 periods. These choices are prior experime
 | uniform | None (equal weights) |
 
 Weight = `2 ** ((period - newest_training_period) / half_life)`, anchored within each fit.
-Original references, the controlled window screen, the graph teacher, and focused joint tuning retain
-their declared decay settings independently. Stage-two graph-risk models follow the selected recency mode.
+This emphasizes recent transaction patterns. Reference configurations, the window screen, graph teacher
+and focused joint study use their own declared decay settings independently. Graph-risk search candidates
+follow the selected recency mode.
 
-Seed checks retain the top five unique individual models, all required references/windows, each family's
+Seed checks evaluate the top five unique individual models, all required references/windows, each family's
 best standalone model, and each family's best complement to the fixed 16/20 reference. Complement
 screening tests added weights **0.10, 0.25, 0.50**. This allows a lower-AUC model to qualify when its combined
 predictions improve the score. Scores use averaged probabilities, not averages of component AUCs.
@@ -128,24 +157,28 @@ because their predictions happen to match on early folds.
 
 ## Validation, safeguards and limitations
 
-Cutoffs remain 10, 14, 18, 21, 25, 28, with validation horizons 14, 14, 14, 14, 10, 7 periods.
-The objective remains weighted mean window ROC-AUC minus 0.05 times window-AUC standard deviation.
+Training cutoffs are 10, 14, 18, 21, 25, 28, with validation horizons 14, 14, 14, 14, 10, 7 periods.
+The selection objective is weighted mean window ROC-AUC minus 0.05 times window-AUC standard deviation.
 Fold weights are 0.2/0.2/0.2/0.2/0.1/0.1. Applicable early stopping uses only an inner training tail.
 
 Blends must improve on the best screened single by 0.0001. Replacing the fixed 16/20 reference also
 requires a selection-score gain of at least 0.0001. This is a tie policy, not a statistical guarantee.
-The original baseline, recent reference and 16/20 reference are fitted afresh. The latter corresponds
-to the user-reported 0.95102 recipe. That reported Kaggle score never enters the objective.
+Reference configurations are fitted from scratch: `reference_lgb` uses all training history with
+half-life 16; `recent_reference_lgb` uses a 16-period window with half-life 32. The fixed 16/20 reference
+averages that configuration with its 20-period counterpart. Kaggle scores never enter the selection
+objective; the notebook does not have hidden test labels.
 
-Development windows overlap and have been reused in previous experiments. Neither these scores nor
-three-seed checks provide an unbiased test estimate. Broader tuning can overfit validation. Added model
-families and graph features can fail to improve Kaggle. No guaranteed ROC-AUC increase is claimed.
+Development windows overlap, and repeated tuning can overfit these periods. Neither their scores nor
+three-seed checks provide an independent test estimate. Heuristic labels, missing neighborhood attributes
+and changing transaction patterns also limit generalization. More trials or a higher validation score
+do not guarantee improved Kaggle performance. Batch graph features may include information unavailable
+at the instant of a real-time decision.
 
 ## Reproducibility and output
 
 Studies are sequential and seeded, with fixed counts; final seeds are 42/137/2026. Keep the same CSVs,
 code, settings and pinned environment to repeat a run. Different libraries/hardware can change floating
-point results and adaptive trial paths. No historical artifacts are read to produce predictions.
+point results and adaptive trial paths. All predictions are generated from the supplied data during the run.
 
 Every run saves `outputs/fresh_search_<timestamp>/` plus a sibling ZIP. Existing output folders can stay.
 The folder includes notebook source, configuration, package versions, input/source hashes, trials,
@@ -153,7 +186,7 @@ validation diagnostics, locked ensemble recipe, model artifacts and aligned subm
 
 Key files:
 
-- `submission.csv`: selected ensemble.
+- `submission.csv`: test probabilities from the selected model or ensemble.
 - `submission_window_reference.csv`: freshly generated fixed 16/20 reference, unless identical to an
   already exported role; consult `submission_manifest.json` for deduplicated filenames.
 - `submission_best_single.csv`, `submission_baseline.csv`, `submission_recent_reference.csv`: alternatives,
@@ -173,11 +206,11 @@ is not a streaming deployment service. Input CSVs are excluded from the ZIP.
 
 ## Verification
 
-`python tests/test_fresh_run.py` runs reduced real fitting and Optuna searches twice in separate empty
+If the optional `tests/` directory is included, `python tests/test_fresh_run.py` runs reduced real fitting and Optuna searches twice in separate empty
 folders using tiny synthetic CSVs. It checks all model families, prediction alignment, deterministic
 results, window selection, canonical recipes, replacement margins, final refitting and artifact reload.
 Additional checks cover directed risk aggregation, missing-neighbor behavior and invariance of earlier
 fits when future labels change. These tests do not train on competition CSVs or measure full runtime.
-The Windows sandbox test uses single-threaded forests because joblib's thread-pool named pipes are blocked;
+Test forests use one thread for compatibility with restricted Windows environments;
 normal notebook fitting uses the configured thread count. Forest prediction accumulation is serial
 to avoid thread-order differences in probability averages.
